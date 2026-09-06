@@ -408,54 +408,50 @@ class TestExecCondition(unittest.TestCase):
 
 
 class TestExecTransform(unittest.TestCase):
-	def test_copy_operation(self):
+	"""GW-34: graph_ir.schema.json's ``TransformNode.config`` requires exactly
+	``op``/``input`` (``additionalProperties: false``) -- the old
+	``transformations: [{source_field, target_field, operation}]`` shape
+	tested here previously was never a schema-valid config a Flow Definition
+	could actually be saved with, so ``_exec_transform`` silently ignoring a
+	real ``op``/``input`` config was the bug (see
+	huf.ai.tests.test_flow_gw34_node_type_gap for the fuller regression
+	suite). These tests now pin the schema's own shape, dispatched through
+	``huf.ai.graph.transforms.run_transform`` -- the same function
+	``procedure_runtime`` uses for the Procedure profile's ``transform`` node.
+	"""
+
+	def test_select_operation(self):
+		flow_run = FakeFlowRun()
+		_ctx(flow_run, rows=[{"name": "Ada", "age": 30}])
+		config = {"op": "select", "input": {"rows": {"$from": "input.rows"}, "fields": ["name"]}}
+		result = flow_engine._exec_transform(flow_run, {}, config, {})
+		self.assertEqual(result["status"], "success")
+		self.assertEqual(result["result"], [{"name": "Ada"}])
+
+	def test_coalesce_operation_resolves_nested_reference(self):
+		flow_run = FakeFlowRun()
+		_ctx(flow_run, user={"name": "Ada"})
+		config = {"op": "coalesce", "input": {"values": [None, {"$from": "input.user.name"}]}}
+		result = flow_engine._exec_transform(flow_run, {}, config, {})
+		self.assertEqual(result["status"], "success")
+		self.assertEqual(result["result"], "Ada")
+
+	def test_unknown_op_fails_closed(self):
+		flow_run = FakeFlowRun()
+		_ctx(flow_run)
+		config = {"op": "not_a_real_op", "input": {}}
+		result = flow_engine._exec_transform(flow_run, {}, config, {})
+		self.assertEqual(result["status"], "failed")
+
+	def test_legacy_transformations_shape_no_longer_applies(self):
+		"""``config.transformations`` predates the shared graph-IR schema and can
+		never be saved through FlowDefinition.validate() any more -- it has no
+		``op``, so run_transform fails closed rather than silently no-op'ing."""
 		flow_run = FakeFlowRun()
 		_ctx(flow_run, source_field="hello")
 		config = {"transformations": [{"source_field": "source_field", "target_field": "dest", "operation": "copy"}]}
 		result = flow_engine._exec_transform(flow_run, {}, config, {})
-		self.assertEqual(result["status"], "success")
-		new_ctx = json.loads(flow_run.context_json)
-		self.assertEqual(new_ctx["dest"], "hello")
-
-	def test_template_operation_resolves_source_path(self):
-		# F-2: "template" used to run source_field through the now-removed
-		# {{...}} string interpolator, letting it compose a string out of
-		# several context values. That composition capability is gone with
-		# the templating syntax; "template" is now the same dotted-path read
-		# as "copy"/"map" -- this pins that it still resolves a nested path.
-		flow_run = FakeFlowRun()
-		_ctx(flow_run, user={"name": "Ada"})
-		config = {
-			"transformations": [
-				{"source_field": "user.name", "target_field": "greeting", "operation": "template"}
-			]
-		}
-		flow_engine._exec_transform(flow_run, {}, config, {})
-		new_ctx = json.loads(flow_run.context_json)
-		self.assertEqual(new_ctx["greeting"], "Ada")
-
-	def test_map_operation_renames(self):
-		flow_run = FakeFlowRun()
-		_ctx(flow_run, old_key="value")
-		config = {"transformations": [{"source_field": "old_key", "target_field": "new_key", "operation": "map"}]}
-		flow_engine._exec_transform(flow_run, {}, config, {})
-		new_ctx = json.loads(flow_run.context_json)
-		self.assertEqual(new_ctx["new_key"], "value")
-
-	def test_transformation_missing_fields_is_skipped(self):
-		flow_run = FakeFlowRun()
-		_ctx(flow_run)
-		config = {"transformations": [{"operation": "copy"}]}
-		result = flow_engine._exec_transform(flow_run, {}, config, {})
-		self.assertEqual(result["status"], "success")
-		self.assertEqual(result["result"], {})
-
-	def test_context_is_persisted_via_db_set(self):
-		flow_run = FakeFlowRun()
-		_ctx(flow_run, a="x")
-		config = {"transformations": [{"source_field": "a", "target_field": "b", "operation": "copy"}]}
-		flow_engine._exec_transform(flow_run, {}, config, {})
-		self.assertTrue(any("context_json" in call for call in flow_run.db_set_calls))
+		self.assertEqual(result["status"], "failed")
 
 
 class TestExecLoopNode(unittest.TestCase):
@@ -761,7 +757,7 @@ class TestHopLimitAndEndCompletion(unittest.TestCase):
 	def test_no_outgoing_edges_from_non_end_node_completes_run(self):
 		flow_run = FakeFlowRun(current_node_id="n1", hop_count=0, max_hops=10, mode="Normal")
 		_ctx(flow_run)
-		nodes_map = {"n1": {"id": "n1", "type": "transform", "config": {"transformations": []}}}
+		nodes_map = {"n1": {"id": "n1", "type": "transform", "config": {"op": "coalesce", "input": {"values": []}}}}
 		with patch.object(flow_engine, "_publish_flow_event"):
 			flow_engine._execute_loop(flow_run, nodes_map, [], {})
 		self.assertEqual(flow_run.status, "Success")
@@ -770,7 +766,7 @@ class TestHopLimitAndEndCompletion(unittest.TestCase):
 		flow_run = FakeFlowRun(current_node_id="n1", hop_count=0, max_hops=10, mode="Normal")
 		_ctx(flow_run)
 		nodes_map = {
-			"n1": {"id": "n1", "type": "transform", "config": {"transformations": []}},
+			"n1": {"id": "n1", "type": "transform", "config": {"op": "coalesce", "input": {"values": []}}},
 			"n2": {"id": "n2", "type": "end", "config": {}},
 		}
 		edges = [{"from": "n1", "to": "n2", "type": "always"}]
@@ -937,7 +933,7 @@ class TestKnownDefects(unittest.TestCase):
 					"max_iterations": 1000,
 				},
 			},
-			"body": {"id": "body", "type": "transform", "config": {"transformations": []}},
+			"body": {"id": "body", "type": "transform", "config": {"op": "coalesce", "input": {"values": []}}},
 			"finish": {"id": "finish", "type": "end", "config": {}},
 		}
 		edges = [{"from": "body", "to": "loop", "type": "always"}]
@@ -980,7 +976,7 @@ class TestKnownDefects(unittest.TestCase):
 		flow_run.db_set = tracking_db_set
 
 		nodes_map = {
-			"n1": {"id": "n1", "type": "transform", "config": {"transformations": []}},
+			"n1": {"id": "n1", "type": "transform", "config": {"op": "coalesce", "input": {"values": []}}},
 			"n2": {"id": "n2", "type": "end", "config": {}},
 		}
 		edges = [{"from": "n1", "to": "n2", "type": "always"}]

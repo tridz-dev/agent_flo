@@ -172,3 +172,73 @@ class TestRunBudgetSpendCheck(IntegrationTestCase):
 
         # Should not raise
         budget.check_spend(999999.0)
+
+
+class TestAgentSettingsSinglesStringCoercion(IntegrationTestCase):
+    """Regression test for HK-01.
+
+    frappe.db.get_single_value on a Singles doctype like ``Agent Settings``
+    can return raw strings pulled straight from ``tabSingles`` (no type
+    coercion happens there the way it does for a normal DocField on a
+    regular table). Passing those uncoerced strings into ``min()``/``max()``
+    alongside real ints, or into arithmetic with real floats, raises
+    ``TypeError``. RunBudget must coerce every Agent Settings value it reads
+    (via cint/flt) before using it.
+    """
+
+    @patch("frappe.db.get_single_value")
+    def test_from_agent_survives_stringy_singles_values(self, mock_get_single_value):
+        """RunBudget.from_agent must not raise TypeError when Agent Settings
+        fields come back as strings (as they do from tabSingles)."""
+
+        def get_single_value_side_effect(doctype, field):
+            # Simulate the raw string values tabSingles can return.
+            stringy_defaults = {
+                "deadline_seconds": "900",
+                "max_turns_ceiling": "20",
+                "spend_cap_usd": "50.5",
+                "max_depth": "3",
+            }
+            return stringy_defaults.get(field)
+
+        mock_get_single_value.side_effect = get_single_value_side_effect
+
+        agent_doc = Mock()
+        agent_doc.name = "test_agent"
+        agent_doc.max_turns = 15  # int, as it would come off a real DocField
+        agent_doc.model = "gpt-4o"
+
+        # Must not raise TypeError: '<' not supported between instances of
+        # 'int' and 'str' (the min() call in from_agent).
+        budget = RunBudget.from_agent(agent_doc)
+
+        assert budget.max_turns_ceiling == 15  # min(15, 20)
+        assert budget.spend_cap_usd == 50.5
+        assert isinstance(budget.spend_cap_usd, float)
+
+        # check_depth() must also coerce a stringy max_depth before the
+        # `self.current_depth >= max_depth` comparison.
+        budget.current_depth = 3
+        with self.assertRaises(frappe.ValidationError):
+            budget.check_depth()
+
+    @patch("frappe.db.get_single_value")
+    def test_from_run_doc_survives_stringy_spend_cap(self, mock_get_single_value):
+        """RunBudget.from_run_doc must not raise TypeError when spend_cap_usd
+        comes back as a string from tabSingles."""
+        mock_get_single_value.return_value = "25.0"
+
+        run_doc = {
+            "budget_deadline_at": datetime.now() + timedelta(seconds=900),
+            "budget_depth": 1,
+            "budget_ancestry": "[]",
+            "budget_spend_usd": 0.0,
+        }
+
+        budget = RunBudget.from_run_doc(run_doc)
+
+        assert budget.spend_cap_usd == 25.0
+        assert isinstance(budget.spend_cap_usd, float)
+
+        # Should not raise TypeError comparing float spend to float cap.
+        budget.check_spend(10.0)

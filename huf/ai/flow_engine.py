@@ -68,6 +68,10 @@ from huf.ai.graph.executor import (
 	RoutingMode,
 	Router,
 )
+from huf.ai.graph.expressions import evaluate_bool, parse_expression
+from huf.ai.graph.transforms import Limits as TransformLimits
+from huf.ai.graph.transforms import run_transform
+from huf.ai.output_budget import OutputBudget, OutputBudgetExceeded, enforce_output_budget
 from huf.ai.tool_invocation import RunContext
 from huf.ai.transaction import commit_if_background
 
@@ -90,6 +94,9 @@ NODE_ROUTING = {
 	"router.llm": RoutingMode.SELF_ROUTED,
 	"loop": RoutingMode.SELF_ROUTED_OPTIONAL,
 	"end": RoutingMode.TERMINAL,
+	# "output" is always terminal per spec/graph-ir.md section 2 ("next must be
+	# absent or null") -- true for both the Procedure and Flow profiles.
+	"output": RoutingMode.TERMINAL,
 }
 
 #: Node types whose handler may be paused by another subsystem writing the
@@ -1243,39 +1250,33 @@ def _exec_condition(flow_run, node: dict, config: dict, settings: dict) -> dict:
 
 def _exec_transform(flow_run, node: dict, config: dict, settings: dict) -> dict:
 	"""
-	Execute transform node - applies data transformations to context.
+	Execute transform node - applies one of the shared graph-IR's
+	:class:`~huf.ai.graph.transforms.TransformOp` operations to a resolved
+	input mapping.
 
-	Config keys:
-	    transformations (list): source_field, target_field, operation
-	        (copy|map|template)
+	Config keys (graph_ir.schema.json ``TransformNode``, ``additionalProperties: false``):
+	    op (str): a ``TransformOp`` name (see ``huf.ai.graph.transforms``)
+	    input (dict): values, each resolved via ``GraphContext.resolve`` against
+	        the run's context, then passed to ``run_transform``
 
-	``copy``, ``map``, and ``template`` are all the same dotted-path read of
-	``source_field`` against the context; they differ only in the author's
-	intent, not in mechanism (F-2 -- ``template`` used to run its source
-	through the now-removed ``{{...}}`` string interpolator).
+	This used to read ``config.get("transformations")`` -- a Flow-only
+	``[{source_field, target_field, operation}]`` shape that the schema never
+	defined (``additionalProperties: false`` on ``TransformNode.config``
+	rejects it outright), so every schema-valid ``transform`` node's ``op``/
+	``input`` were silently ignored. ``run_transform`` is the same function
+	:mod:`huf.ai.graph.procedure_runtime` uses for the Procedure profile's
+	``transform`` node -- one implementation of the operation, shared by both
+	profiles, per graph_ir.schema.json's single ``TransformNode`` definition.
 	"""
 	ctx = _context_of(flow_run, settings)
-	data = ctx.as_dict()
-	transformations = config.get("transformations", [])
+	resolved_input = ctx.resolve(config.get("input") or {})
+	result = run_transform(config.get("op"), resolved_input, TransformLimits())
 
-	results = {}
-	for t in transformations:
-		source = t.get("source_field", "")
-		target = t.get("target_field", "")
+	if not result.ok:
+		err = result.error
+		return {"status": "failed", "error": err.message if err else f"transform '{config.get('op')}' failed"}
 
-		if not source or not target:
-			continue
-
-		try:
-			value = _resolve_context_path(data, source)
-			ctx.set(target, value)
-			results[target] = value
-		except Exception as e:
-			results[target] = f"Error: {str(e)}"
-
-	_persist_context(flow_run, ctx, settings)
-
-	return {"status": "success", "result": results}
+	return {"status": "success", "result": result.value, "output": result.value}
 
 
 def _exec_loop_node(flow_run, node: dict, config: dict, settings: dict) -> dict:
@@ -1336,6 +1337,226 @@ def _exec_end(flow_run, node: dict, config: dict, settings: dict) -> dict:
 	return {"status": "success", "output": "flow_complete"}
 
 
+def _flow_nodes_by_id(settings: dict) -> dict:
+	"""Every node in the pinned graph, by id -- for looking up a ``foreach``
+	``body`` or ``parallel`` ``branches`` member, which per spec/graph-ir.md
+	section 2 lives in the same top-level ``nodes`` array as the main chain.
+	"""
+	run_ctx = _run_context(settings)
+	graph = run_ctx.definition if run_ctx is not None else {}
+	return {n["id"]: n for n in graph.get("nodes", []) if isinstance(n, dict) and "id" in n}
+
+
+def _run_sub_chain(flow_run, settings: dict, node_ids: list) -> dict:
+	"""Walk one self-contained chain of node ids (a ``foreach`` body or a
+	``parallel`` branch) to completion, re-using :func:`_execute_node`'s own
+	dispatch table so every node type -- including a nested ``condition`` --
+	behaves exactly as it would on the main chain. Bounded by the chain's own
+	length (+2 headroom, mirroring ``procedure_runtime._sub_executor``): this
+	is a distinct budget from the run's ``max_hops``, never charged against it.
+
+	Records each visited node's output into the shared ``GraphContext`` (the
+	same ``node_id -> output`` bookkeeping ``GraphExecutor.run`` does for the
+	main chain, executor.py:744) so a ``foreach.config.collect`` reference
+	into a body node's output -- or any ``{"$from": "<node_id>...."}`` inside
+	the chain itself -- resolves, instead of silently returning ``None``.
+	"""
+	ctx = _context_of(flow_run, settings)
+	by_id = _flow_nodes_by_id(settings)
+	cursor = node_ids[0] if node_ids else None
+	max_hops = len(node_ids) + 2
+	hops = 0
+	last_result = {"status": "success"}
+
+	while cursor is not None:
+		hops += 1
+		if hops > max_hops:
+			return {"status": "failed", "error": f"sub-chain exceeded its hop budget ({max_hops})"}
+
+		node = by_id.get(cursor)
+		if node is None:
+			return {"status": "failed", "error": f"sub-chain references unknown node '{cursor}'"}
+
+		last_result = _execute_node(flow_run, node, settings)
+		ctx.record_output(cursor, last_result.get("output", last_result.get("result")))
+		if last_result.get("status") == "failed":
+			on_error = node.get("on_error")
+			if not on_error:
+				return last_result
+			cursor = on_error
+			continue
+
+		if NODE_ROUTING.get(node.get("type")) == RoutingMode.SELF_ROUTED:
+			cursor = last_result.get("next_node_id")
+		else:
+			cursor = node.get("next")
+
+	return last_result
+
+
+def _exec_foreach(flow_run, node: dict, config: dict, settings: dict) -> dict:
+	"""
+	Execute foreach node - a bounded batch over ``config.items``, running
+	``config.body`` once per item (graph_ir.schema.json ``ForeachNode``).
+
+	Unlike the old ``loop`` node (still registered below for any run pinned
+	before this fix, but no longer schema-reachable), ``foreach`` never
+	re-enters the main chain -- its body is a self-contained chain walked by
+	:func:`_run_sub_chain`, and its iteration cap is its own budget, never the
+	run's ``max_hops`` (spec/graph-ir.md section 2.1).
+	"""
+	node_id = node.get("id")
+	ctx = _context_of(flow_run, settings)
+	items = ctx.resolve(config.get("items"))
+	if not isinstance(items, list):
+		return {"status": "failed", "error": f"foreach node '{node_id}' 'items' did not resolve to a list"}
+
+	run_ctx = _run_context(settings)
+	contract_limits = ((run_ctx.definition.get("contract") or {}).get("limits") or {}) if run_ctx is not None else {}
+	caps = [c for c in (config.get("max_iterations"), contract_limits.get("max_foreach_iterations")) if c is not None]
+	effective_cap = min(caps) if caps else len(items)
+	if len(items) > effective_cap:
+		return {
+			"status": "failed",
+			"error": f"foreach '{node_id}' has {len(items)} items, exceeds max_iterations ({effective_cap})",
+		}
+
+	body_ids = config.get("body") or []
+	collect_ref = config.get("collect")
+	on_item_error = config.get("on_item_error", "fail")
+
+	results = []
+	for index, item in enumerate(items):
+		ctx.push_foreach(item, index)
+		try:
+			outcome = _run_sub_chain(flow_run, settings, body_ids)
+			if outcome.get("status") != "success":
+				if on_item_error == "skip":
+					continue
+				return {"status": "failed", "error": f"foreach '{node_id}' item {index} failed: {outcome.get('error')}"}
+			results.append(ctx.resolve(collect_ref) if collect_ref is not None else None)
+		finally:
+			ctx.pop_foreach()
+
+	_persist_context(flow_run, ctx, settings)
+	return {"status": "success", "result": results, "output": results}
+
+
+def _exec_parallel(flow_run, node: dict, config: dict, settings: dict) -> dict:
+	"""
+	Execute parallel node - bounded fan-out over ``config.branches``
+	(graph_ir.schema.json ``ParallelNode``). ``join`` is always ``"all"``: the
+	node completes only once every branch has completed or failed.
+
+	Branches run sequentially, in declaration order -- not concurrently. Real
+	bounded concurrency (mirroring ``huf.ai.graph.scheduler.run_parallel_branches``,
+	used by the Procedure profile's own ``parallel`` node) is future work; this
+	keeps Flow's ``parallel`` schema-valid and runnable today without adding
+	threading to a runtime whose steps are already persisted and replayed one
+	at a time (``_FlowStateStore``), and produces the same per-branch results a
+	concurrent run would, just not concurrently.
+	"""
+	node_id = node.get("id")
+	branches = config.get("branches") or []
+	if not branches:
+		return {"status": "success", "result": {"branches_completed": 0, "join": config.get("join", "all")}}
+
+	for index, branch_ids in enumerate(branches):
+		outcome = _run_sub_chain(flow_run, settings, branch_ids)
+		if outcome.get("status") != "success":
+			return {"status": "failed", "error": f"parallel '{node_id}' branch {index} failed: {outcome.get('error')}"}
+
+	return {
+		"status": "success",
+		"result": {"branches_completed": len(branches), "join": config.get("join", "all")},
+	}
+
+
+def _exec_validate(flow_run, node: dict, config: dict, settings: dict) -> dict:
+	"""
+	Execute validate node - fails closed if any ``config.assertions`` entry
+	evaluates falsy (graph_ir.schema.json ``ValidateNode``).
+
+	``expression`` is a ``$defs/Expression`` -- "evaluated by the shared
+	expression evaluator (graph-ir.md section 4)" per the schema's own
+	description, i.e. ``huf.ai.graph.expressions.evaluate_bool``/
+	``parse_expression`` against ``GraphContext.reference_roots()`` (the same
+	evaluator ``procedure_runtime._handle_validate`` uses for the Procedure
+	profile), never Flow's older ``flow_eval.safe_eval_expression`` (a
+	different, ``context["key"]``-subscript grammar predating the shared IR).
+	"""
+	ctx = _context_of(flow_run, settings)
+	bindings = ctx.reference_roots()
+	failures = []
+	for assertion in config.get("assertions", []):
+		try:
+			parsed = parse_expression(assertion["expression"])
+			truthy = evaluate_bool(parsed, bindings)
+		except Exception as e:
+			return {
+				"status": "failed",
+				"error": f"validate node '{node.get('id')}' assertion expression failed: {e}",
+			}
+		if not truthy:
+			failures.append({"code": assertion["code"], "message": assertion["message"]})
+
+	if failures:
+		return {"status": "failed", "error": json.dumps(failures)}
+	return {"status": "success", "result": {"assertions_passed": len(config.get("assertions", []))}}
+
+
+def _exec_output(flow_run, node: dict, config: dict, settings: dict) -> dict:
+	"""
+	Execute output node - always terminal (see ``NODE_ROUTING``). Resolves
+	``config.value`` and enforces the graph's output budget (I7, mirroring
+	``procedure_runtime._Runner._handle_output``): a value that breaches
+	``max_rows``/``max_output_bytes`` fails the node rather than being
+	silently truncated.
+	"""
+	ctx = _context_of(flow_run, settings)
+	value = ctx.resolve(config.get("value"))
+
+	run_ctx = _run_context(settings)
+	limits = ((run_ctx.definition.get("contract") or {}).get("limits") or {}) if run_ctx is not None else {}
+	budget_kwargs = {}
+	if limits.get("max_rows") is not None:
+		budget_kwargs["max_rows"] = limits["max_rows"]
+	if limits.get("max_output_bytes") is not None:
+		budget_kwargs["max_bytes"] = limits["max_output_bytes"]
+	budget = OutputBudget(**budget_kwargs) if budget_kwargs else OutputBudget()
+
+	if isinstance(value, list):
+		try:
+			enforce_output_budget(value, budget=budget)
+		except OutputBudgetExceeded as exc:
+			return {"status": "failed", "error": str(exc)}
+	elif isinstance(value, dict):
+		size = len(json.dumps(value, default=str, ensure_ascii=False).encode("utf-8"))
+		if size > budget.max_bytes:
+			return {
+				"status": "failed",
+				"error": f"output node '{node.get('id')}' value is {size} bytes, exceeds max_output_bytes ({budget.max_bytes}); refusing to truncate",
+			}
+		for key, field_value in value.items():
+			if isinstance(field_value, list) and len(field_value) > budget.max_rows:
+				return {
+					"status": "failed",
+					"error": f"output node '{node.get('id')}' field '{key}' has {len(field_value)} rows, exceeds max_rows ({budget.max_rows}); refusing to truncate",
+				}
+
+	return {"status": "success", "output": value, "result": value}
+
+
+#: "http_request", "loop" and "end" are not in FLOW_NODE_TYPES
+#: (huf.ai.graph.validator) at all -- no schema-valid Flow Definition can be
+#: *saved* with one of these types any more (superseded by "tool.call",
+#: "foreach" and a plain no-``next`` chain end, respectively). They stay
+#: registered here, not removed, because a ``Flow Run`` created before this
+#: schema existed pins its graph at creation (``PinnedVersion``, F-1 in this
+#: module's docstring) and keeps executing that exact graph for its whole
+#: life -- an already-running or paused run using one of these types must
+#: still be able to advance. Remove an entry here only once no such pinned
+#: run can still be outstanding.
 _NODE_EXECUTORS = {
 	"trigger.webhook": _exec_trigger_webhook,
 	"trigger.schedule": _exec_trigger_schedule,
@@ -1349,6 +1570,10 @@ _NODE_EXECUTORS = {
 	"transform": _exec_transform,
 	"loop": _exec_loop_node,
 	"end": _exec_end,
+	"foreach": _exec_foreach,
+	"parallel": _exec_parallel,
+	"validate": _exec_validate,
+	"output": _exec_output,
 }
 
 _NODE_TYPES = tuple(_NODE_EXECUTORS)
