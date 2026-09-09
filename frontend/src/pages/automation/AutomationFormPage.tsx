@@ -358,7 +358,7 @@ export function AutomationFormPage() {
 
       toast.success(isNew ? 'Automation created' : 'Automation saved');
       if (isNew) {
-        navigate(`/automations/${encodeURIComponent(automationName_)}`, { replace: true });
+        navigate(agent ? `/agents/${encodeURIComponent(agent)}#triggers` : '/automations', { replace: true });
       }
     } catch {
       // createAutomation/updateAutomation/createTrigger/updateTrigger
@@ -388,7 +388,13 @@ export function AutomationFormPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button type="button" variant="outline" onClick={() => navigate(-1)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() =>
+              navigate(agent ? `/agents/${encodeURIComponent(agent)}#triggers` : '/automations', { replace: true })
+            }
+          >
             Cancel
           </Button>
           <Button type="button" onClick={handleSave} disabled={saving}>
