@@ -50,9 +50,10 @@ export function automationStatusToggleAction(status: AutomationStatus): Automati
       return { kind: 'resume', label: 'Resume' };
     case 'Archived':
       return null;
-    default:
+    default: {
       const _exhaustive: never = status;
       return _exhaustive;
+    }
   }
 }
 

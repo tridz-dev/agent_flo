@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Zap, Play, Pause, Archive, ExternalLink, Loader2, RotateCcw } from 'lucide-react';
+import { Zap, Play, Pause, Archive, ExternalLink, Loader2, RotateCcw, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { PageFrame } from '@/layouts/PageFrame';
@@ -20,6 +20,7 @@ import {
   automationTriggerTypesLabel,
   automationStatusToggleAction,
   automationCanRunNow,
+  type AutomationRowAction,
 } from '@/utils/automationDisplay';
 import type { Automation, AutomationTriggerType } from '@/types/automation.types';
 
@@ -178,7 +179,7 @@ export function AutomationsPage() {
           const canRunNow = automationCanRunNow(automation.status);
 
           // Map toggle action kind to icon
-          const toggleActionIconMap: Record<string, any> = {
+          const toggleActionIconMap: Record<AutomationRowAction['kind'], LucideIcon> = {
             activate: Zap,
             pause: Pause,
             resume: RotateCcw,
