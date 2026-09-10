@@ -111,8 +111,12 @@ export function AutomationsPage() {
           });
           const byKey = Object.fromEntries(descriptors.map((d) => [d.key, d]));
 
+          // ItemCard's ActionButton has no `disabled` field, so a descriptor
+          // that's disabled (e.g. Archive on an already-Archived automation,
+          // or any action while another is in flight for this row) must be
+          // filtered out here rather than rendered-but-inert.
           const inlineActions = [byKey.open, byKey.run]
-            .filter((d): d is NonNullable<typeof d> => !!d)
+            .filter((d): d is NonNullable<typeof d> => !!d && !d.disabled)
             .map((d) => ({
               icon: d.busy ? Loader2 : d.icon,
               label: d.label,
@@ -120,7 +124,7 @@ export function AutomationsPage() {
             }));
 
           const menuActions = [byKey.toggle, byKey.archive]
-            .filter((d): d is NonNullable<typeof d> => !!d)
+            .filter((d): d is NonNullable<typeof d> => !!d && !d.disabled)
             .map((d) => ({
               icon: d.icon,
               label: d.label,

@@ -57,6 +57,7 @@ export function buildAutomationActions(
       icon: TOGGLE_ICON_MAP[toggleAction.kind],
       label: toggleAction.label,
       busy: ctx.list.isBusy(automation.name, 'pause'),
+      disabled: ctx.list.isBusy(automation.name),
       onClick: () => ctx.list.toggleStatus(automation),
     });
   }
