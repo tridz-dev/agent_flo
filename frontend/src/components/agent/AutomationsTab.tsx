@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Play, Pause, Copy, Archive, ExternalLink, Loader2, Workflow, AlertCircle } from 'lucide-react';
+import { Plus, Play, Pause, Zap, RotateCcw, Copy, Archive, ExternalLink, Loader2, Workflow, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -29,6 +29,8 @@ import {
   formatAutomationTimestamp,
   automationStatusBadgeVariant,
   automationTriggerTypesLabel,
+  automationStatusToggleAction,
+  automationCanRunNow,
 } from '@/utils/automationDisplay';
 
 interface AutomationsTabProps {
@@ -215,32 +217,48 @@ export function AutomationsTab({ agentId }: AutomationsTabProps) {
                         >
                           <ExternalLink className="w-4 h-4" />
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          title="Run now"
-                          onClick={() => handleRunNow(automation)}
-                          disabled={rowBusy}
-                        >
-                          {busyRun ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          title={isActive ? 'Pause' : 'Resume'}
-                          onClick={() => handleTogglePause(automation)}
-                          disabled={rowBusy}
-                        >
-                          {busyPause ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : isActive ? (
-                            <Pause className="w-4 h-4" />
-                          ) : (
-                            <Play className="w-4 h-4" />
-                          )}
-                        </Button>
+                        {automationCanRunNow(automation.status) && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            title="Run now"
+                            onClick={() => handleRunNow(automation)}
+                            disabled={rowBusy}
+                          >
+                            {busyRun ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                          </Button>
+                        )}
+                        {(() => {
+                          const toggleAction = automationStatusToggleAction(automation.status);
+                          if (!toggleAction) return null;
+
+                          let icon;
+                          switch (toggleAction.kind) {
+                            case 'activate':
+                              icon = <Zap className="w-4 h-4" />;
+                              break;
+                            case 'pause':
+                              icon = <Pause className="w-4 h-4" />;
+                              break;
+                            case 'resume':
+                              icon = <RotateCcw className="w-4 h-4" />;
+                              break;
+                          }
+
+                          return (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              title={toggleAction.label}
+                              onClick={() => handleTogglePause(automation)}
+                              disabled={rowBusy}
+                            >
+                              {busyPause ? <Loader2 className="w-4 h-4 animate-spin" /> : icon}
+                            </Button>
+                          );
+                        })()}
                         <Button
                           type="button"
                           variant="ghost"
