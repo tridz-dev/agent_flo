@@ -78,6 +78,11 @@ export interface Automation {
   modified?: string;
 }
 
+/** An Automation as rendered in a list, with its trigger types resolved. */
+export interface AutomationRow extends Automation {
+  triggerTypes: AutomationTriggerType[];
+}
+
 /**
  * Automation Trigger doctype
  * (huf/huf/doctype/automation_trigger/automation_trigger.json).
