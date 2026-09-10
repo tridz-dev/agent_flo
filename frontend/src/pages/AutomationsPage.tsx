@@ -1,32 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Zap, Play, Pause, Archive, ExternalLink, Loader2, RotateCcw, type LucideIcon } from 'lucide-react';
+import { Zap, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { PageFrame } from '@/layouts/PageFrame';
 import { FilterBar, GridView, ItemCard, EmptyState } from '@/components/dashboard';
 import { usePageData } from '@/hooks/dashboard/usePageData';
-import {
-  listAutomations,
-  listTriggers,
-  runAutomationNow,
-  pauseAutomation,
-  resumeAutomation,
-  archiveAutomation,
-} from '@/services/automationApi';
+import { useAutomationsList } from '@/hooks/useAutomationsList';
+import { buildAutomationActions } from '@/utils/automationActions';
 import {
   formatAutomationTimestamp,
   automationStatusBadgeVariant,
   automationTriggerTypesLabel,
-  automationStatusToggleAction,
-  automationCanRunNow,
-  type AutomationRowAction,
 } from '@/utils/automationDisplay';
-import type { Automation, AutomationTriggerType } from '@/types/automation.types';
-
-interface AutomationRow extends Automation {
-  triggerTypes: AutomationTriggerType[];
-}
+import type { AutomationRow } from '@/types/automation.types';
 
 const statusOptions = [
   { label: 'All statuses', value: 'all' },
@@ -39,88 +26,32 @@ const statusOptions = [
 
 export function AutomationsPage() {
   const navigate = useNavigate();
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const list = useAutomationsList();
 
-  const fetchAutomations = useCallback(async () => {
-    const automations = await listAutomations();
-    const withTriggers = await Promise.all(
-      automations.map(async (automation) => {
-        const triggers = await listTriggers(automation.name);
-        const triggerTypes = triggers
-          .map((trigger) => trigger.trigger_type)
-          .filter((type): type is AutomationTriggerType => !!type);
-        return { ...automation, triggerTypes };
-      })
-    );
-    return withTriggers;
-  }, []);
-
-  const { data: rows, allData, loading, error, search, setSearch, filters, setFilters, refresh } =
+  const { data: rows, allData, search, setSearch, filters, setFilters, setData } =
     usePageData<AutomationRow>({
-      fetchFn: fetchAutomations,
       searchFields: ['automation_name', 'description'],
       filterFn: (item, activeFilters) =>
         !activeFilters.status || activeFilters.status === 'all' || item.status === activeFilters.status,
     });
 
+  // usePageData's fetch effect has [] deps and can't compose with a hook
+  // that also fetches, so useAutomationsList() owns the actual fetch here
+  // and usePageData is kept only for the search/filter layer on top --
+  // seed it from list.rows whenever the shared hook's data changes.
   useEffect(() => {
-    if (error) {
+    setData(list.rows);
+  }, [list.rows, setData]);
+
+  useEffect(() => {
+    if (list.error) {
       toast.error('Failed to load automations', {
-        description: error.message || 'An error occurred while fetching automations.',
+        description: list.error.message || 'An error occurred while fetching automations.',
       });
     }
-  }, [error]);
+  }, [list.error]);
 
   const setStatusFilter = (value: string) => setFilters((prev) => ({ ...prev, status: value }));
-
-  const handleRunNow = async (automation: AutomationRow) => {
-    setPendingAction(`run:${automation.name}`);
-    try {
-      await runAutomationNow(automation.name);
-      toast.success(`Running "${automation.automation_name}"`);
-    } catch (err) {
-      toast.error('Failed to run automation', {
-        description: err instanceof Error ? err.message : 'An error occurred.',
-      });
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
-  const handleTogglePause = async (automation: AutomationRow) => {
-    setPendingAction(`pause:${automation.name}`);
-    try {
-      if (automation.status === 'Active') {
-        await pauseAutomation(automation.name);
-        toast.success('Automation paused');
-      } else {
-        await resumeAutomation(automation.name);
-        toast.success('Automation resumed');
-      }
-      await refresh();
-    } catch (err) {
-      toast.error('Failed to update automation', {
-        description: err instanceof Error ? err.message : 'An error occurred.',
-      });
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
-  const handleArchive = async (automation: AutomationRow) => {
-    setPendingAction(`archive:${automation.name}`);
-    try {
-      await archiveAutomation(automation.name);
-      toast.success('Automation archived');
-      await refresh();
-    } catch (err) {
-      toast.error('Failed to archive automation', {
-        description: err instanceof Error ? err.message : 'An error occurred.',
-      });
-    } finally {
-      setPendingAction(null);
-    }
-  };
 
   const hasActiveFilters = !!search || (filters.status && filters.status !== 'all');
 
@@ -147,7 +78,7 @@ export function AutomationsPage() {
       <GridView
         items={rows}
         columns={{ sm: 1, md: 2, lg: 3 }}
-        loading={loading}
+        loading={list.loading}
         emptyState={
           hasActiveFilters ? (
             <EmptyState
@@ -174,16 +105,28 @@ export function AutomationsPage() {
           )
         }
         renderItem={(automation) => {
-          const busy = pendingAction?.endsWith(`:${automation.name}`);
-          const toggleAction = automationStatusToggleAction(automation.status);
-          const canRunNow = automationCanRunNow(automation.status);
+          const descriptors = buildAutomationActions(automation, {
+            list,
+            onOpen: (a) => navigate(`/automations/${a.name}`),
+          });
+          const byKey = Object.fromEntries(descriptors.map((d) => [d.key, d]));
 
-          // Map toggle action kind to icon
-          const toggleActionIconMap: Record<AutomationRowAction['kind'], LucideIcon> = {
-            activate: Zap,
-            pause: Pause,
-            resume: RotateCcw,
-          };
+          const inlineActions = [byKey.open, byKey.run]
+            .filter((d): d is NonNullable<typeof d> => !!d)
+            .map((d) => ({
+              icon: d.busy ? Loader2 : d.icon,
+              label: d.label,
+              onClick: d.onClick,
+            }));
+
+          const menuActions = [byKey.toggle, byKey.archive]
+            .filter((d): d is NonNullable<typeof d> => !!d)
+            .map((d) => ({
+              icon: d.icon,
+              label: d.label,
+              onClick: d.onClick,
+              ...(d.key === 'archive' ? { variant: 'destructive' as const } : {}),
+            }));
 
           return (
             <ItemCard
@@ -199,50 +142,15 @@ export function AutomationsPage() {
                 { label: 'Agent', value: automation.agent },
                 { label: 'Last run', value: formatAutomationTimestamp(automation.last_execution) },
               ]}
-              actions={[
-                {
-                  icon: ExternalLink,
-                  label: 'Open',
-                  onClick: () => navigate(`/automations/${automation.name}`),
-                },
-                ...(canRunNow
-                  ? [
-                      {
-                        icon: busy && pendingAction === `run:${automation.name}` ? Loader2 : Play,
-                        label: 'Run now',
-                        onClick: () => handleRunNow(automation),
-                      },
-                    ]
-                  : []),
-              ]}
-              menuActions={[
-                ...(toggleAction
-                  ? [
-                      {
-                        icon: toggleActionIconMap[toggleAction.kind],
-                        label: toggleAction.label,
-                        onClick: () => handleTogglePause(automation),
-                      },
-                    ]
-                  : []),
-                ...(automation.status === 'Archived'
-                  ? []
-                  : [
-                      {
-                        icon: Archive,
-                        label: 'Archive',
-                        variant: 'destructive' as const,
-                        onClick: () => handleArchive(automation),
-                      },
-                    ]),
-              ]}
+              actions={inlineActions}
+              menuActions={menuActions}
               onClick={() => navigate(`/automations/${automation.name}`)}
             />
           );
         }}
         keyExtractor={(automation) => automation.name}
       />
-      {!loading && allData.length > 0 && (
+      {!list.loading && allData.length > 0 && (
         <div className="text-center py-4 text-sm text-muted-foreground">
           Showing {rows.length} of {allData.length} automation{allData.length === 1 ? '' : 's'}
         </div>
