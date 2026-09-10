@@ -24,11 +24,14 @@ import {
 } from '@/components/automation/TriggerEditor';
 import { AUTOMATION_TRIGGER_TYPES } from '@/components/automation/TriggerFieldsConfig';
 import {
+  archiveAutomation,
   createAutomation,
   createTrigger,
   deleteTrigger,
   getAutomation,
   listTriggers,
+  pauseAutomation,
+  resumeAutomation,
   updateAutomation,
   updateTrigger,
 } from '@/services/automationApi';
@@ -36,16 +39,15 @@ import { getAgents, getAIModels, type AIModelItem } from '@/services/agentApi';
 import { listProjects } from '@/services/projectApi';
 import { db } from '@/lib/frappe-sdk';
 import { doctype } from '@/data/doctypes';
+import { automationStatusBadgeVariant, automationStatusToggleAction } from '@/utils/automationDisplay';
 import type {
   Automation,
   AutomationConversationMode,
-  AutomationStatus,
   AutomationTrigger as AutomationTriggerDoc,
 } from '@/types/automation.types';
 import type { AgentDoc } from '@/types/agent.types';
 import type { HufProject } from '@/services/projectApi';
 
-const AUTOMATION_STATUSES: AutomationStatus[] = ['Draft', 'Active', 'Paused', 'Error', 'Archived'];
 const CONVERSATION_MODES: AutomationConversationMode[] = ['New', 'Dedicated', 'No-UI'];
 
 let localTriggerCounter = 0;
@@ -127,6 +129,7 @@ export function AutomationFormPage() {
 
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
+  const [statusActionPending, setStatusActionPending] = useState<'toggle' | 'archive' | null>(null);
   const [activeTab, setActiveTab] = useState('general');
   const [automation, setAutomation] = useState<Automation | null>(null);
 
@@ -135,7 +138,6 @@ export function AutomationFormPage() {
   const [description, setDescription] = useState('');
   const [agent, setAgent] = useState(preselectedAgent || '');
   const [project, setProject] = useState('');
-  const [status, setStatus] = useState<AutomationStatus>('Draft');
 
   // Task
   const [instruction, setInstruction] = useState('');
@@ -188,7 +190,6 @@ export function AutomationFormPage() {
       setDescription(automationDoc.description || '');
       setAgent(automationDoc.agent);
       setProject(automationDoc.project || '');
-      setStatus(automationDoc.status);
       setInstruction(automationDoc.instruction || '');
       setModelOverride(automationDoc.model_override || '');
       setConversationMode(automationDoc.conversation_mode || 'New');
@@ -241,6 +242,40 @@ export function AutomationFormPage() {
     setTriggerRows((rows) => rows.filter((r) => r._localId !== row._localId));
   };
 
+  const handleStatusToggle = async () => {
+    if (!automation || !automationId) return;
+    const action = automationStatusToggleAction(automation.status);
+    if (!action) return;
+    setStatusActionPending('toggle');
+    try {
+      if (action.kind === 'pause') {
+        await pauseAutomation(automationId);
+      } else {
+        await resumeAutomation(automationId);
+      }
+      toast.success(`Automation ${action.kind === 'pause' ? 'paused' : 'activated'}`);
+      await loadExisting(automationId);
+    } catch {
+      // pauseAutomation/resumeAutomation already surface a toast on failure.
+    } finally {
+      setStatusActionPending(null);
+    }
+  };
+
+  const handleArchive = async () => {
+    if (!automationId) return;
+    setStatusActionPending('archive');
+    try {
+      await archiveAutomation(automationId);
+      toast.success('Automation archived');
+      await loadExisting(automationId);
+    } catch {
+      // archiveAutomation already surfaces a toast on failure.
+    } finally {
+      setStatusActionPending(null);
+    }
+  };
+
   const validate = (): string | null => {
     if (!automationName.trim()) return 'Name is required.';
     if (!agent) return 'Select an Agent.';
@@ -291,7 +326,6 @@ export function AutomationFormPage() {
           description: description.trim(),
           agent,
           project: project || undefined,
-          status,
           model_override: modelOverride || undefined,
           run_as_user: runAsUser || undefined,
           instruction: instruction.trim(),
@@ -462,25 +496,40 @@ export function AutomationFormPage() {
               />
             </div>
           </div>
-          {!isNew && (
+          {!isNew && automation && (
             <div className="space-y-1.5">
               <Label>Status</Label>
-              <Select onValueChange={(v) => setStatus(v as AutomationStatus)} value={status}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {AUTOMATION_STATUSES.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-steel-soft">
-                Prefer the Automations tab&apos;s Pause/Resume actions for normal use -- this is a direct
-                override.
-              </p>
+              <div className="flex items-center gap-2">
+                <Badge variant={automationStatusBadgeVariant(automation.status)}>{automation.status}</Badge>
+                {(() => {
+                  const action = automationStatusToggleAction(automation.status);
+                  if (!action) return null;
+                  return (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStatusToggle}
+                      disabled={statusActionPending !== null}
+                    >
+                      {statusActionPending === 'toggle' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                      {action.label}
+                    </Button>
+                  );
+                })()}
+                {automation.status !== 'Archived' && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleArchive}
+                    disabled={statusActionPending !== null}
+                  >
+                    {statusActionPending === 'archive' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                    Archive
+                  </Button>
+                )}
+              </div>
             </div>
           )}
         </CardContent>

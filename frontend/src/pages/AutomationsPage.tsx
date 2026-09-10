@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Zap, Play, Pause, Archive, ExternalLink, Loader2 } from 'lucide-react';
+import { Zap, Play, Pause, Archive, ExternalLink, Loader2, RotateCcw, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { PageFrame } from '@/layouts/PageFrame';
@@ -18,6 +18,9 @@ import {
   formatAutomationTimestamp,
   automationStatusBadgeVariant,
   automationTriggerTypesLabel,
+  automationStatusToggleAction,
+  automationCanRunNow,
+  type AutomationRowAction,
 } from '@/utils/automationDisplay';
 import type { Automation, AutomationTriggerType } from '@/types/automation.types';
 
@@ -172,7 +175,16 @@ export function AutomationsPage() {
         }
         renderItem={(automation) => {
           const busy = pendingAction?.endsWith(`:${automation.name}`);
-          const isActive = automation.status === 'Active';
+          const toggleAction = automationStatusToggleAction(automation.status);
+          const canRunNow = automationCanRunNow(automation.status);
+
+          // Map toggle action kind to icon
+          const toggleActionIconMap: Record<AutomationRowAction['kind'], LucideIcon> = {
+            activate: Zap,
+            pause: Pause,
+            resume: RotateCcw,
+          };
+
           return (
             <ItemCard
               title={automation.automation_name}
@@ -193,18 +205,26 @@ export function AutomationsPage() {
                   label: 'Open',
                   onClick: () => navigate(`/automations/${automation.name}`),
                 },
-                {
-                  icon: busy && pendingAction === `run:${automation.name}` ? Loader2 : Play,
-                  label: 'Run now',
-                  onClick: () => handleRunNow(automation),
-                },
+                ...(canRunNow
+                  ? [
+                      {
+                        icon: busy && pendingAction === `run:${automation.name}` ? Loader2 : Play,
+                        label: 'Run now',
+                        onClick: () => handleRunNow(automation),
+                      },
+                    ]
+                  : []),
               ]}
               menuActions={[
-                {
-                  icon: isActive ? Pause : Play,
-                  label: isActive ? 'Pause' : 'Resume',
-                  onClick: () => handleTogglePause(automation),
-                },
+                ...(toggleAction
+                  ? [
+                      {
+                        icon: toggleActionIconMap[toggleAction.kind],
+                        label: toggleAction.label,
+                        onClick: () => handleTogglePause(automation),
+                      },
+                    ]
+                  : []),
                 ...(automation.status === 'Archived'
                   ? []
                   : [
