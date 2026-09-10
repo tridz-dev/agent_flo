@@ -16,11 +16,24 @@ fail with `Security Violation [pathsec.open]: refusing multiply-linked file`.
 `ensure_writable_nltk_data()` makes indexing environment-agnostic instead of
 disabling the check: it copies LlamaIndex's bundled NLTK data (a real
 `shutil.copy`, which always creates a fresh inode with `st_nlink == 1`) into a
-private, per-site directory the first time it's needed, and points
-`nltk.data.path` there first so `nltk.data.load`/`find` resolve the copy
-before the original bundled files.
+private, per-site directory the first time it's needed.
+
+Crucially, the fix must be visible to `llama_index.core.utils.GlobalsHelper`,
+which is the thing that actually loads stopwords/punkt during chunking
+(`SentenceSplitter` -> `globals_helper.stopwords`/`.punkt_tokenizer`).
+`GlobalsHelper.wait_for_nltk_check()` does not consult `nltk.data.path` at
+all for its own lookup: it resolves a single `_nltk_data_dir` (the `NLTK_DATA`
+env var if set, else its bundled `_static/nltk_cache`) and calls
+`nltk.data.find(..., paths=[self._nltk_data_dir])` with that *explicit*,
+narrowed search path -- so merely prepending to `nltk.data.path` (which is
+what a plain `nltk.corpus.stopwords.words()` call consults) never reaches
+this lookup, and the hardlinked file is still what gets opened. Setting the
+`NLTK_DATA` environment variable is what actually redirects it, so we set
+that (in addition to `nltk.data.path`, for any other caller that does honor
+it) before `GlobalsHelper` is ever touched.
 """
 
+import os
 import shutil
 
 import frappe
@@ -60,6 +73,10 @@ def ensure_writable_nltk_data() -> None:
 		if not _is_populated(private_root, bundled_root):
 			shutil.rmtree(private_root, ignore_errors=True)
 			shutil.copytree(bundled_root, private_root, copy_function=shutil.copy)
+
+		# Must come before any GlobalsHelper access (its lookup ignores
+		# nltk.data.path and only honors this env var or its own bundled dir).
+		os.environ["NLTK_DATA"] = private_root
 
 		if private_root not in nltk.data.path:
 			nltk.data.path.insert(0, private_root)
