@@ -17,6 +17,38 @@ export const knowledgeTypes = [
 
 ] as const;
 
+/**
+ * Preset options shown on the Knowledge Source form to steer first-time users
+ * away from raw backend names. "Connect my own vector database" reveals the
+ * full `knowledgeTypes` select plus per-backend advanced settings.
+ */
+export const knowledgeTypePresets = [
+	{
+		id: 'keyword',
+		label: 'Keyword search (no setup)',
+		description: 'Fast full-text search out of the box. No embedding model or extra configuration required.',
+		knowledgeType: 'sqlite_fts' as const,
+	},
+	{
+		id: 'semantic',
+		label: 'Semantic search (recommended)',
+		description: 'Understands meaning, not just keywords. Runs in-process with a portable file — no server to run.',
+		knowledgeType: 'zvec' as const,
+		defaults: {
+			embedding_model: 'text-embedding-3-small',
+			vector_dimension: 1536,
+		},
+	},
+	{
+		id: 'custom',
+		label: 'Connect my own vector database',
+		description: 'Choose a specific backend (ChromaDB, PGVector, Redis, Weaviate, FAISS, Pinecone, etc.) and configure its connection directly.',
+		knowledgeType: null,
+	},
+] as const;
+
+export type KnowledgeTypePresetId = (typeof knowledgeTypePresets)[number]['id'];
+
 export type KnowledgeTypeOption = (typeof knowledgeTypes)[number]['value'];
 
 export const VECTOR_KNOWLEDGE_TYPES = [

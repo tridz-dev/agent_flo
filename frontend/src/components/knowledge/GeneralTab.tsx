@@ -5,9 +5,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Combobox } from '@/components/ui/combobox';
 import { Checkbox } from '@/components/ui/checkbox';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ChevronDown } from 'lucide-react';
 import { UseFormReturn } from 'react-hook-form';
-import { useMemo } from 'react';
-import { knowledgeTypes, knowledgeScopes, knowledgeStorageModes, chromaModes, isVectorKnowledgeType } from '@/data/knowledge';
+import { useMemo, useState } from 'react';
+import { cn } from '@/lib/utils';
+import { knowledgeTypes, knowledgeScopes, knowledgeTypePresets, chromaModes, isVectorKnowledgeType } from '@/data/knowledge';
+import type { KnowledgeTypePresetId } from '@/data/knowledge';
 import { linkRoutes } from '@/lib/link-routes';
 import type { KnowledgeSourceFormValues } from './types';
 import { AdvancedConfigFields } from './AdvancedConfigFields';
@@ -23,22 +28,53 @@ interface GeneralTabProps {
   providers?: ProviderOption[];
 }
 
+const scopeDescriptions: Record<string, string> = {
+  Site: 'Only agents and users on this site can query this knowledge base.',
+  Workspace: 'Shared across agents within the same workspace on this site.',
+  Agent: 'Private to a single agent — other agents cannot query it.',
+  Global: 'Available to every agent and site that can reach this instance.',
+};
+
+function presetIdForKnowledgeType(knowledgeType: string | undefined): KnowledgeTypePresetId {
+  const preset = knowledgeTypePresets.find((p) => p.knowledgeType === knowledgeType);
+  return preset ? preset.id : 'custom';
+}
+
 export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
   const watchKnowledgeType = form.watch('knowledge_type');
   const watchChromaMode = form.watch('chroma_mode');
   const watchPGVectorConnectionMode = form.watch('pgvector_connection_mode');
+
+  const [presetId, setPresetId] = useState<KnowledgeTypePresetId>(() =>
+    presetIdForKnowledgeType(form.getValues('knowledge_type')),
+  );
 
   const providerOptions = useMemo(
     () => providers.map((p) => ({ value: p.name, label: p.provider_name || p.name })),
     [providers],
   );
 
+  const handlePresetChange = (id: KnowledgeTypePresetId) => {
+    setPresetId(id);
+    const preset = knowledgeTypePresets.find((p) => p.id === id);
+    if (!preset || preset.knowledgeType === null) return;
+    form.setValue('knowledge_type', preset.knowledgeType, { shouldDirty: true, shouldValidate: true });
+    if ('defaults' in preset && preset.defaults) {
+      if (!form.getValues('embedding_model')?.trim()) {
+        form.setValue('embedding_model', preset.defaults.embedding_model, { shouldDirty: true });
+      }
+      if (!form.getValues('vector_dimension')) {
+        form.setValue('vector_dimension', preset.defaults.vector_dimension, { shouldDirty: true });
+      }
+    }
+  };
+
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Configuration</CardTitle>
-          <CardDescription>Basic settings for this knowledge source</CardDescription>
+          <CardTitle>Details</CardTitle>
+          <CardDescription>Name and description for this knowledge source</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-6">
           {isNew && (
@@ -47,11 +83,11 @@ export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
               name="source_name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Source name</FormLabel>
+                  <FormLabel>Name</FormLabel>
                   <FormControl>
-                    <Input placeholder="my-knowledge-source" {...field} />
+                    <Input placeholder="e.g. Product documentation" {...field} />
                   </FormControl>
-                  <FormDescription>Unique identifier for this knowledge source</FormDescription>
+                  <FormDescription>A friendly title for this knowledge source, shown throughout the app</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -77,7 +113,66 @@ export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
             )}
           />
 
-          <div className="grid gap-6 sm:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="scope"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Scope</FormLabel>
+                <Select onValueChange={field.onChange} value={field.value}>
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select scope" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    {knowledgeScopes.map((scope) => (
+                      <SelectItem key={scope.value} value={scope.value}>
+                        {scope.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  Controls who can query this knowledge base. {scopeDescriptions[field.value] ?? ''}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Search type</CardTitle>
+          <CardDescription>How this knowledge source is indexed and searched</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-6">
+          <RadioGroup
+            value={presetId}
+            onValueChange={(value) => handlePresetChange(value as KnowledgeTypePresetId)}
+            className="grid gap-3 sm:grid-cols-3"
+          >
+            {knowledgeTypePresets.map((preset) => (
+              <label
+                key={preset.id}
+                htmlFor={`knowledge-type-preset-${preset.id}`}
+                className={cn(
+                  'flex cursor-pointer flex-col gap-2 rounded-lg border p-4 text-sm transition-colors',
+                  presetId === preset.id ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted/50',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <RadioGroupItem value={preset.id} id={`knowledge-type-preset-${preset.id}`} />
+                  <span className="font-medium">{preset.label}</span>
+                </div>
+                <span className="text-muted-foreground">{preset.description}</span>
+              </label>
+            ))}
+          </RadioGroup>
+
+          {presetId === 'custom' && (
             <FormField
               control={form.control}
               name="knowledge_type"
@@ -103,57 +198,7 @@ export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
                 </FormItem>
               )}
             />
-
-            <FormField
-              control={form.control}
-              name="scope"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Scope</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select scope" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {knowledgeScopes.map((scope) => (
-                        <SelectItem key={scope.value} value={scope.value}>
-                          {scope.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name="storage_mode"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Storage mode</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select storage mode" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {knowledgeStorageModes.map((mode) => (
-                        <SelectItem key={mode.value} value={mode.value}>
-                          {mode.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-          </div>
+          )}
         </CardContent>
       </Card>
 
@@ -559,7 +604,7 @@ export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6">
-
+            <h4 className="text-sm font-medium mb-2">Advanced Configuration</h4>
             <AdvancedConfigFields knowledgeType={watchKnowledgeType} />
           </CardContent>
         </Card>
@@ -617,53 +662,64 @@ export function GeneralTab({ form, isNew, providers = [] }: GeneralTabProps) {
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Chunking settings</CardTitle>
-          <CardDescription>Control how content is split into chunks for indexing</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-6 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="chunk_size"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Chunk size</FormLabel>
-                <FormControl>
-                  <Input
-                    type="number"
-                    placeholder="512"
-                    {...field}
-                    onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : 512)}
-                  />
-                </FormControl>
-                <FormDescription>Number of characters per chunk (minimum 100)</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+      <Collapsible defaultOpen={false}>
+        <Card>
+          <CollapsibleTrigger asChild>
+            <CardHeader className="cursor-pointer select-none">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Advanced settings</CardTitle>
+                  <CardDescription>Control how content is split into chunks for indexing</CardDescription>
+                </div>
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 [[data-state=open]_&]:rotate-180" />
+              </div>
+            </CardHeader>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <CardContent className="grid gap-6 sm:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="chunk_size"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Chunk size</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        placeholder="512"
+                        {...field}
+                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : 512)}
+                      />
+                    </FormControl>
+                    <FormDescription>Number of tokens per chunk (minimum 100)</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
 
-          <FormField
-            control={form.control}
-            name="chunk_overlap"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Chunk overlap</FormLabel>
-                <FormControl>
-                  <Input
-                    type="number"
-                    placeholder="50"
-                    {...field}
-                    onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : 50)}
-                  />
-                </FormControl>
-                <FormDescription>Overlap between adjacent chunks</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </CardContent>
-      </Card>
+              <FormField
+                control={form.control}
+                name="chunk_overlap"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Chunk overlap</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        placeholder="50"
+                        {...field}
+                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : 50)}
+                      />
+                    </FormControl>
+                    <FormDescription>Overlap between adjacent chunks</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </CardContent>
+          </CollapsibleContent>
+        </Card>
+      </Collapsible>
     </div>
   );
 }

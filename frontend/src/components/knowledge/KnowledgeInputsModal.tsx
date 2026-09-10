@@ -16,7 +16,17 @@ import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
-import { Plus, Trash2, RefreshCw, FileText, Link, Type, Loader2, Upload, X, AlertCircle } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Plus, Trash2, RefreshCw, FileText, Link, Type, Loader2, Upload, X, AlertCircle, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { knowledgeInputTypes } from '@/data/knowledge';
@@ -35,6 +45,14 @@ interface QueuedUpload {
   progress: number;
   status: 'uploading' | 'creating' | 'error';
   error?: string;
+}
+
+const INPUTS_POLL_INTERVAL_MS = 4000;
+
+const SETTLED_INPUT_STATUSES: ReadonlySet<string> = new Set(['Indexed', 'Error']);
+
+function hasUnsettledInput(list: KnowledgeInputDoc[]): boolean {
+  return list.some((input) => !SETTLED_INPUT_STATUSES.has(input.status));
 }
 
 interface KnowledgeInputsModalProps {
@@ -93,6 +111,13 @@ export function KnowledgeInputsModal({
   const [creating, setCreating] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<QueuedUpload[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const inputsRef = useRef<KnowledgeInputDoc[]>([]);
+  inputsRef.current = inputs;
+
+  const uploading = uploadQueue.some((item) => item.status === 'uploading' || item.status === 'creating');
 
   // Create form state
   const [inputType, setInputType] = useState<KnowledgeInputType>('File');
@@ -117,6 +142,36 @@ export function KnowledgeInputsModal({
       loadInputs();
     }
   }, [open, knowledgeSource, loadInputs]);
+
+  // Poll the inputs list while anything is still Pending/Processing so
+  // status badges (and the "safe to close" banner) settle on their own,
+  // mirroring the fallback-polling approach in useRunStatusPolling.
+  useEffect(() => {
+    if (!open || !knowledgeSource) return;
+    if (!hasUnsettledInput(inputsRef.current)) return;
+
+    let cancelled = false;
+    const intervalId = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const data = await getKnowledgeInputs(knowledgeSource);
+        if (cancelled) return;
+        setInputs(data);
+        if (!hasUnsettledInput(data)) {
+          onSourceChanged();
+        }
+      } catch (error) {
+        // A failed poll must not kill the fallback; the next tick retries.
+        console.error('Error polling knowledge inputs:', error);
+      }
+    }, INPUTS_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, knowledgeSource, inputs, onSourceChanged]);
 
   const resetForm = () => {
     setInputType('File');
@@ -224,15 +279,33 @@ export function KnowledgeInputsModal({
     }
   };
 
-  const handleDelete = async (name: string) => {
+  const handleDeleteConfirmed = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await deleteKnowledgeInput(name);
+      await deleteKnowledgeInput(deleteTarget);
       toast.success('Knowledge input deleted');
+      setDeleteTarget(null);
       await loadInputs();
       onSourceChanged();
     } catch {
       toast.error('Failed to delete knowledge input');
+    } finally {
+      setDeleting(false);
     }
+  };
+
+  const handleModalOpenChange = (next: boolean) => {
+    if (!next && uploading) {
+      setCloseGuardOpen(true);
+      return;
+    }
+    onOpenChange(next);
+  };
+
+  const confirmCloseWhileUploading = () => {
+    setCloseGuardOpen(false);
+    onOpenChange(false);
   };
 
   const handleReprocess = async (name: string) => {
@@ -246,8 +319,10 @@ export function KnowledgeInputsModal({
     }
   };
 
+  const hasProcessingInput = inputs.some((input) => input.status === 'Processing' || input.status === 'Pending');
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleModalOpenChange}>
       <DialogScrollContent className="max-w-2xl">
         <DialogScrollHeader>
           <DialogTitle>Knowledge inputs</DialogTitle>
@@ -258,9 +333,20 @@ export function KnowledgeInputsModal({
 
         <DialogScrollBody className="space-y-4 py-2">
           <div className="flex items-center justify-between">
-            <p className="text-sm text-steel">
-              {inputs.length} {inputs.length === 1 ? 'input' : 'inputs'}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-sm text-steel">
+                {inputs.length} {inputs.length === 1 ? 'input' : 'inputs'}
+              </p>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => void loadInputs()}
+                disabled={loading}
+                title="Refresh"
+              >
+                <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+              </Button>
+            </div>
             <Button
               size="sm"
               variant={showCreate ? 'secondary' : 'default'}
@@ -270,6 +356,16 @@ export function KnowledgeInputsModal({
               New input
             </Button>
           </div>
+
+          {hasProcessingInput && (
+            <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-2.5 text-xs text-steel-soft">
+              <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <p>
+                Indexing runs in the background. Once your files finish uploading, it&apos;s safe to close
+                this dialog or navigate away — processing will continue.
+              </p>
+            </div>
+          )}
 
           {showCreate && (
             <div className="rounded-lg border p-4 space-y-4">
@@ -444,7 +540,7 @@ export function KnowledgeInputsModal({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        onClick={() => handleDelete(input.name)}
+                        onClick={() => setDeleteTarget(input.name)}
                         title="Delete"
                         className="text-destructive hover:text-destructive"
                       >
@@ -458,6 +554,55 @@ export function KnowledgeInputsModal({
           )}
         </DialogScrollBody>
       </DialogScrollContent>
+
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(next) => { if (!next && !deleting) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this input?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove the input and any chunks indexed from it. This action cannot
+              be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleDeleteConfirmed();
+              }}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={closeGuardOpen} onOpenChange={setCloseGuardOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel upload in progress?</AlertDialogTitle>
+            <AlertDialogDescription>
+              A file is still uploading. Closing this dialog now will interrupt the upload before it
+              finishes.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep uploading</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                confirmCloseWhileUploading();
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Cancel upload and close
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
