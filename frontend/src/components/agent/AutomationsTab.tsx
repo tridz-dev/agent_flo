@@ -189,7 +189,6 @@ export function AutomationsTab({ agentId }: AutomationsTabProps) {
             </TableHeader>
             <TableBody>
               {rows.map((automation) => {
-                const isActive = automation.status === 'Active';
                 const busyRun = pendingAction === `run:${automation.name}`;
                 const busyPause = pendingAction === `pause:${automation.name}`;
                 const busyArchive = pendingAction === `archive:${automation.name}`;
