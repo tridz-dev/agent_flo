@@ -21,6 +21,7 @@ export interface ComboboxOption {
   value: string;
   label: string;
   subtitle?: string;
+  action?: () => void;
 }
 
 export interface ComboboxProps {
@@ -48,6 +49,7 @@ export function Combobox({
   id,
   options,
   value,
+
   onValueChange,
   placeholder = 'Select option...',
   disabled = false,
@@ -97,6 +99,11 @@ export function Combobox({
                   key={option.value}
                   value={option.value}
                   onSelect={() => {
+                   if (option.action) {
+                     option.action();
+		     setOpen(false);
+		     return;
+                    }
                     onValueChange?.(option.value === value ? '' : option.value);
                     setOpen(false);
                   }}
