@@ -10,7 +10,11 @@ import {
   createKnowledgeSource,
   updateKnowledgeSource,
   rebuildIndex,
+  getKnowledgeInputs,
+  reprocessInput,
+  deleteKnowledgeInput,
 } from '../services/knowledgeApi';
+import type { KnowledgeInputDoc } from '../types/knowledge.types';
 import { getProviders } from '../services/providerApi';
 import type { AIProvider } from '../types/agent.types';
 import { getFrappeErrorMessage } from '../lib/frappe-error';
@@ -181,6 +185,8 @@ function KnowledgeSourceFormPage() {
   const [inputsModalOpen, setInputsModalOpen] = useState(false);
   const [sourceDoc, setSourceDoc] = useState<KnowledgeSourceDoc | null>(null);
   const [providers, setProviders] = useState<AIProvider[]>([]);
+  const [inputs, setInputs] = useState<KnowledgeInputDoc[]>([]);
+  const [inputsLoading, setInputsLoading] = useState(false);
   const allowNavigationRef = useRef(false);
 
   const form = useForm<KnowledgeSourceFormValues>({
@@ -232,6 +238,21 @@ function KnowledgeSourceFormPage() {
     [form],
   );
 
+  const loadInputs = useCallback(
+    async (name: string) => {
+      setInputsLoading(true);
+      try {
+        const data = await getKnowledgeInputs(name);
+        setInputs(data);
+      } catch (error) {
+        console.error('Error loading knowledge inputs:', error);
+      } finally {
+        setInputsLoading(false);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     getProviders()
       .then((data) => setProviders(data as AIProvider[]))
@@ -240,11 +261,30 @@ function KnowledgeSourceFormPage() {
 
   useEffect(() => {
     if (id && !isNew) {
-      loadSource(id).then(() => setLoading(false));
+      Promise.all([loadSource(id), loadInputs(id)]).then(() => setLoading(false));
     } else if (isNew) {
       setLoading(false);
     }
-  }, [id, isNew, loadSource]);
+  }, [id, isNew, loadSource, loadInputs]);
+
+  // Poll source status + inputs while indexing/rebuilding is in flight, so the
+  // Status tab reflects progress without the user manually refreshing.
+  const IN_PROGRESS_SOURCE_STATUSES = useMemo(() => new Set(['Indexing', 'Rebuilding']), []);
+  const IN_PROGRESS_INPUT_STATUSES = useMemo(() => new Set(['Pending', 'Processing']), []);
+  const isSourceInProgress = !!sourceDoc && IN_PROGRESS_SOURCE_STATUSES.has(sourceDoc.status);
+  const hasInProgressInput = inputs.some((input) => IN_PROGRESS_INPUT_STATUSES.has(input.status));
+  const STATUS_POLL_INTERVAL_MS = 4000;
+
+  useEffect(() => {
+    if (isNew || !id) return;
+    if (!isSourceInProgress && !hasInProgressInput) return;
+
+    const intervalId = setInterval(() => {
+      void Promise.all([loadSource(id), loadInputs(id)]);
+    }, STATUS_POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [isNew, id, isSourceInProgress, hasInProgressInput, loadSource, loadInputs]);
 
   // After a freshly-created source redirects here with ?upload=1, jump straight
   // into the inputs modal so uploading files doesn't need an extra click.
@@ -354,8 +394,8 @@ function KnowledgeSourceFormPage() {
     setRebuilding(true);
     try {
       await rebuildIndex(id);
-      toast.success('Rebuild started. Refresh to check progress.');
-      await loadSource(id);
+      toast.success('Rebuild started');
+      await Promise.all([loadSource(id), loadInputs(id)]);
     } catch (error) {
       const msg = getFrappeErrorMessage(error);
       toast.error(msg || 'Failed to start rebuild');
@@ -368,7 +408,7 @@ function KnowledgeSourceFormPage() {
     if (!id || isNew) return;
     setRefreshing(true);
     try {
-      await loadSource(id);
+      await Promise.all([loadSource(id), loadInputs(id)]);
       toast.success('Refreshed');
     } catch {
       toast.error('Failed to refresh');
@@ -379,7 +419,29 @@ function KnowledgeSourceFormPage() {
 
   const handleSourceChanged = async () => {
     if (id && !isNew) {
-      await loadSource(id);
+      await Promise.all([loadSource(id), loadInputs(id)]);
+    }
+  };
+
+  const handleReprocessInput = async (name: string) => {
+    try {
+      await reprocessInput(name);
+      toast.success('Reprocessing started');
+      if (id) await Promise.all([loadSource(id), loadInputs(id)]);
+    } catch (error) {
+      const msg = getFrappeErrorMessage(error);
+      toast.error(msg || 'Failed to reprocess knowledge input');
+    }
+  };
+
+  const handleDeleteInput = async (name: string) => {
+    try {
+      await deleteKnowledgeInput(name);
+      toast.success('Knowledge input deleted');
+      if (id) await Promise.all([loadSource(id), loadInputs(id)]);
+    } catch (error) {
+      const msg = getFrappeErrorMessage(error);
+      toast.error(msg || 'Failed to delete knowledge input');
     }
   };
 
@@ -431,7 +493,13 @@ function KnowledgeSourceFormPage() {
               </TabsContent>
 
               <TabsContent value="status" className="space-y-4">
-                <StatusTab source={sourceDoc} />
+                <StatusTab
+                  source={sourceDoc}
+                  inputs={inputs}
+                  inputsLoading={inputsLoading}
+                  onReprocessInput={handleReprocessInput}
+                  onDeleteInput={handleDeleteInput}
+                />
               </TabsContent>
             </Tabs>
           </form>
