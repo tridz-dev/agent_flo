@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react';
+import { toast } from 'sonner';
 import { FormField, FormItem, FormLabel, FormControl, FormDescription, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Slider } from '@/components/ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { getProviders, getModels, createProvider, createModel } from '@/services/providerApi';        
 import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
@@ -53,6 +57,153 @@ export function GeneralTab({
   const isVoiceOnly = watchModality === 'Voice';
 
   const [cacheStatus, setCacheStatus] = useState<CacheableModelsResponse | null>(null);
+    const [providerOptions, setProviderOptions] = useState<AIProvider[]>(providers);
+  const [modelOptions, setModelOptions] = useState<AIModel[]>(models);
+  const [providerSearch, setProviderSearch] = useState('');
+  const [modelSearch, setModelSearch] = useState('');
+
+  const [showProviderDialog, setShowProviderDialog] = useState(false);
+  const [showModelDialog, setShowModelDialog] = useState(false);
+
+  const [newProviderName, setNewProviderName] = useState('');
+  const [newProviderApiKey, setNewProviderApiKey] = useState('');
+  const [newModelName, setNewModelName] = useState('');
+
+  const [creatingProvider, setCreatingProvider] = useState(false);
+  const [creatingModel, setCreatingModel] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      getProviders({
+        search: providerSearch,
+        limit: 50,
+      })
+        .then((res) => {
+          const items = Array.isArray(res) ? res : res.items;
+          setProviderOptions(items);
+        })
+        .catch(console.error);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [providerSearch]);
+
+  useEffect(() => {
+    if (!watchProvider) {
+      setModelOptions([]);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      getModels({
+        provider: watchProvider,
+        search: modelSearch,
+        limit: 50,
+      })
+        .then((res) => {
+          const items = Array.isArray(res) ? res : res.items;
+          setModelOptions(items);
+        })
+        .catch(console.error);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [watchProvider, modelSearch]);
+
+  const providerComboOptions: ComboboxOption[] = [
+    ...providerOptions.map((provider) => ({
+      value: provider.name,
+      label: provider.provider_name || provider.name,
+    })),
+    {
+      value: '__add_provider__',
+      label: '+ Add Provider',
+      action: () => setShowProviderDialog(true),
+    },
+  ];
+
+  const modelComboOptions: ComboboxOption[] = [
+    ...modelOptions
+      .filter((model) => model.provider === watchProvider)
+      .map((model) => ({
+        value: model.name,
+        label: model.model_name || model.name,
+      })),
+    {
+      value: '__add_model__',
+      label: '+ Add Model',
+      action: () => setShowModelDialog(true),
+    },
+  ];
+
+  const handleCreateProvider = async () => {
+    if (!newProviderName.trim()) return;
+
+    try {
+      setCreatingProvider(true);
+
+      const created = await createProvider({
+        provider_name: newProviderName.trim(),
+        api_key: newProviderApiKey.trim(),
+      });
+
+      const providerName = created.name;
+
+      setProviderSearch('');
+      setShowProviderDialog(false);
+      setNewProviderName('');
+      setNewProviderApiKey('');
+
+      const refreshed = await getProviders({ search: '', limit: 50 });
+      const items = Array.isArray(refreshed) ? refreshed : refreshed.items;
+      setProviderOptions(items);
+
+      form.setValue('provider', providerName);
+      form.setValue('model', '');
+
+      toast.success('Provider created');
+    } catch (error) {
+      toast.error('Failed to create provider');
+      console.error(error);
+    } finally {
+      setCreatingProvider(false);
+    }
+  };
+
+  const handleCreateModel = async () => {
+    if (!newModelName.trim() || !watchProvider) return;
+
+    try {
+      setCreatingModel(true);
+
+      const created = await createModel({
+        model_name: newModelName.trim(),
+        provider: watchProvider,
+      });
+
+      setShowModelDialog(false);
+      setNewModelName('');
+
+      const refreshed = await getModels({
+        provider: watchProvider,
+        search: '',
+        limit: 50,
+      });
+
+      const items = Array.isArray(refreshed) ? refreshed : refreshed.items;
+      setModelOptions(items);
+
+      form.setValue('model', created.name);
+
+      toast.success('Model created');
+    } catch (error) {
+      toast.error('Failed to create model');
+      console.error(error);
+    } finally {
+      setCreatingModel(false);
+    }
+  };
+
 
   useEffect(() => {
     if (!watchEnablePromptCaching || !watchProvider || !watchModel) {
@@ -150,6 +301,9 @@ export function GeneralTab({
               <Accordion type="single" collapsible className="w-full">
                 <AccordionItem value="description">
                   <AccordionTrigger>Description</AccordionTrigger>
+
+
+
                   <AccordionContent>
                     <FormField
                       control={form.control}
@@ -163,7 +317,9 @@ export function GeneralTab({
                               {...field}
                             />
                           </FormControl>
-                          <FormDescription>A short summary describing what this agent does or is designed for.</FormDescription>
+                          <FormDescription>
+                            A short summary describing what this agent does or is designed for.
+                          </FormDescription>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -177,134 +333,151 @@ export function GeneralTab({
       </Card>
 
       {!isVoiceOnly && (
-      <Card>
-        <CardHeader>
-          <CardTitle>LLM configuration</CardTitle>
-          <CardDescription>Configure language model settings</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-6 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="provider"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Provider</FormLabel>
-                <FormControl>
-                  <LinkFieldControl value={field.value} linkTo={linkRoutes.aiProvider}>
-                    <Select
-                      onValueChange={(value) => {
-                        field.onChange(value);
-                        form.setValue('model', '');
-                      }}
-                      value={field.value || undefined}
-                      disabled={locked}
+        <Card>
+          <CardHeader>
+            <CardTitle>LLM configuration</CardTitle>
+            <CardDescription>Configure language model settings</CardDescription>
+          </CardHeader>
+
+          <CardContent className="grid gap-6 sm:grid-cols-2">
+            <FormField
+              control={form.control}
+              name="provider"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Provider</FormLabel>
+                  <FormControl>
+                    <LinkFieldControl value={field.value} linkTo={linkRoutes.aiProvider}>
+                      <Combobox
+                        options={providerComboOptions}
+                        value={field.value || ''}
+                        onValueChange={(value) => {
+                          field.onChange(value);
+                          form.setValue('model', '');
+                          setModelSearch('');
+                        }}
+                        placeholder="Select provider"
+                        searchPlaceholder="Search providers..."
+                        emptyText="No providers found"
+                        disabled={locked}
+                      />
+                    </LinkFieldControl>
+                  </FormControl>
+                  <FormDescription>
+                    The AI provider that will power this agent (e.g., OpenAI, OpenRouter).
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="model"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Model</FormLabel>
+                  <FormControl>
+                    <LinkFieldControl
+                      value={field.value}
+                      linkTo={linkRoutes.aiModel}
+                      disabled={!watchProvider}
                     >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select provider" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {providers.map((provider) => (
-                          <SelectItem key={provider.name} value={provider.name}>
-                            {provider.provider_name || provider.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </LinkFieldControl>
-                </FormControl>
-                <FormDescription>The AI provider that will power this agent (e.g., OpenAI, OpenRouter).</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+                      <Combobox
+                        options={modelComboOptions}
+                        value={field.value || ''}
+                        onValueChange={field.onChange}
+                        placeholder={watchProvider ? 'Select model' : 'Select provider first'}
+                        searchPlaceholder="Search models..."
+                        emptyText="No models found"
+                        disabled={!watchProvider || locked}
+                      />
+                    </LinkFieldControl>
+                  </FormControl>
+                  <FormDescription>
+                    The specific AI model to use from the selected provider (e.g., gpt-4-turbo).
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name="model"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Model</FormLabel>
-                <FormControl>
-                  <LinkFieldControl value={field.value} linkTo={linkRoutes.aiModel} disabled={!watchProvider}>
-                    <Select onValueChange={field.onChange} value={field.value || undefined} disabled={!watchProvider || locked}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select model" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {models
-                          .filter((model) => model.provider === watchProvider)
-                          .map((model) => (
-                            <SelectItem key={model.name} value={model.name}>
-                              {model.model_name || model.name}
-                            </SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </LinkFieldControl>
-                </FormControl>
-                <FormDescription>The specific AI model to use from the selected provider (e.g., gpt-4-turbo).</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+            <FormField
+              control={form.control}
+              name="temperature"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Temperature: {field.value}</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      value={[field.value]}
+                      onValueChange={(vals) => field.onChange(vals[0])}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    What sampling temperature to use, between 0 and 2. Higher values like 0.8
+                    will make the output more random, while lower values like 0.2 will make it
+                    more focused and deterministic.
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name="temperature"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Temperature: {field.value}</FormLabel>
-                <FormControl>
-                  <Slider min={0} max={2} step={0.1} value={[field.value]} onValueChange={(vals) => field.onChange(vals[0])} />
-                </FormControl>
-                <FormDescription>
-                  What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic.
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name="top_p"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Top P: {field.value}</FormLabel>
-                <FormControl>
-                  <Slider min={0} max={1} step={0.05} value={[field.value]} onValueChange={(vals) => field.onChange(vals[0])} />
-                </FormControl>
-                <FormDescription className="whitespace-pre-line">
-                  {`An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.
+            <FormField
+              control={form.control}
+              name="top_p"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Top P: {field.value}</FormLabel>
+                  <FormControl>
+                    <Slider
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={[field.value]}
+                      onValueChange={(vals) => field.onChange(vals[0])}
+                    />
+                  </FormControl>
+                  <FormDescription className="whitespace-pre-line">
+                    {`An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.
 
 We generally recommend altering this or temperature but not both.`}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name="run_immediately"
-            render={({ field }) => (
-              <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4 sm:col-span-2">
-                <div className="space-y-0.5 pr-4">
-                  <FormLabel className="text-base">Run immediately</FormLabel>
-                  <FormDescription>
-                    When enabled, agent runs execute synchronously and return a direct response. When disabled (default), runs are queued to avoid holding web workers during long LLM and tool calls. Enable only for trusted calls that require an immediate response.
                   </FormDescription>
-                </div>
-                <FormControl>
-                  <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />
-                </FormControl>
-              </FormItem>
-            )}
-          />
-        </CardContent>
-      </Card>
-      )}
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
+            <FormField
+              control={form.control}
+              name="run_immediately"
+              render={({ field }) => (
+                <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4 sm:col-span-2">
+                  <div className="space-y-0.5 pr-4">
+                    <FormLabel className="text-base">Run immediately</FormLabel>
+                    <FormDescription>
+                      When enabled, agent runs execute synchronously and return a direct response.
+                      When disabled (default), runs are queued to avoid holding web workers during
+                      long LLM and tool calls. Enable only for trusted calls that require an
+                      immediate response.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value ?? false}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+          </CardContent>
+        </Card>
+      )}
       <Card>
         <CardHeader>
           <CardTitle>Prompt source</CardTitle>
@@ -588,6 +761,75 @@ We generally recommend altering this or temperature but not both.`}
         </CardContent>
       </Card>
       )}
+
+      <Dialog open={showProviderDialog} onOpenChange={setShowProviderDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Provider</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div>
+              <FormLabel>Provider name</FormLabel>
+              <Input
+                value={newProviderName}
+                onChange={(e) => setNewProviderName(e.target.value)}
+                placeholder="OpenAI"
+              />
+            </div>
+
+            <div>
+              <FormLabel>API key</FormLabel>
+              <Input
+                type="password"
+                value={newProviderApiKey}
+                onChange={(e) => setNewProviderApiKey(e.target.value)}
+                placeholder="API key"
+              />
+            </div>
+
+            <Button
+              type="button"
+              onClick={handleCreateProvider}
+              disabled={!newProviderName.trim() || creatingProvider}
+            >
+              {creatingProvider ? 'Creating...' : 'Create Provider'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showModelDialog} onOpenChange={setShowModelDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Model</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div>
+              <FormLabel>Model name</FormLabel>
+              <Input
+                value={newModelName}
+                onChange={(e) => setNewModelName(e.target.value)}
+                placeholder="gpt-4o"
+              />
+            </div>
+
+            <Button
+              type="button"
+              onClick={handleCreateModel}
+              disabled={!newModelName.trim() || !watchProvider || creatingModel}
+            >
+              {creatingModel ? 'Creating...' : 'Create Model'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+
+
+
+
     </div>
   );
 }

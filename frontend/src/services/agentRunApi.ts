@@ -114,7 +114,7 @@ export async function getAgentRuns(
     // Backward compatibility: if no params, return simple array
     if (!params) {
       const runs = await db.getDocList(doctype['Agent Run'], {
-        fields: ['name', 'agent', 'start_time', 'end_time', 'status', 'is_child', 'cached_tokens'],
+        fields: ['name', 'agent', 'start_time', 'end_time', 'status', 'is_child', 'cached_tokens', 'cost'],
         limit: 1000,
         orderBy: { field: 'creation', order: 'desc' },
       });
@@ -152,7 +152,7 @@ export async function getAgentRuns(
 
     // Fetch data
     const runs = await db.getDocList(doctype['Agent Run'], {
-      fields: ['name', 'agent', 'start_time', 'end_time', 'status', 'is_child', 'cached_tokens'],
+      fields: ['name', 'agent', 'start_time', 'end_time', 'status', 'is_child', 'cached_tokens', 'cost'],
       filters: filters.length > 0 ? (filters as Filter<Record<string, unknown>>[]) : undefined,
       limit: limit + 1, // Fetch one extra to check if there's more
       ...(start > 0 && { limit_start: start }),

@@ -58,7 +58,7 @@ const TIME_RANGE_MS: Record<string, number | null> = {
 };
 
 /** Columns whose values are numeric/temporal and read better right-aligned with tabular figures. */
-const RIGHT_ALIGNED_COLUMNS = new Set(['cached_tokens', 'duration', 'started']);
+const RIGHT_ALIGNED_COLUMNS = new Set(['cost', 'cached_tokens', 'duration', 'started']);
 
 function getRunStatusDot(status?: string): { variant: StatusDotVariant; label: string } {
   const normalized = status?.toLowerCase() || '';
@@ -286,6 +286,18 @@ function ExecutionsRunsTab() {
             <div className="flex items-center gap-2">
               <StatusDot variant={variant} />
               <span className="font-body text-[13px] text-steel">{label}</span>
+            </div>
+          );
+        },
+      },
+      {
+        accessorKey: 'cost',
+        header: 'Cost',
+        cell: ({ row }) => {
+          const cost = row.original.cost;
+          return (
+            <div className="text-right font-mono text-[12px] tabular-nums text-steel">
+              {typeof cost === 'number' ? `$${cost.toFixed(6)}` : 'Not available'}
             </div>
           );
         },
